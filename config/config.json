@@ -8,6 +8,10 @@
     "accuracy": 0.0016,
     "p_fail": 0.25,
     "error_norm": 1,
-    "molecules": ["h2", "hydrofluoric acid", "water", "ammonia", "methane", "O2", "CO2", "NaCl"]
+    "molecules": [
+    {"name": "h2", "source": "name"},
+    {"name": "water", "source": "name"},
+    {"name": "femoco.json", "source": "geometry"}
+    ]
 }
 
