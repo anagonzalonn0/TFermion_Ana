@@ -3,6 +3,7 @@ import json
 import numpy as np
 import h5py
 import scipy 
+from scipy.linalg import eigh #Double factorization requires the eigenvalues and eigenvectors of the Hamiltonian, which can be computed with eigh
 
 #from openfermionpsi4 import run_psi4
 from openfermionpyscf import run_pyscf
@@ -52,6 +53,8 @@ class Molecule:
         self.molecule_info = molecule_info
         self.tools = tools
         self.program = program
+        self.basis = self.tools.config_variables.get('basis', 'sto-3g') ##ADD BY ANA FOR DOUBLE FACTORIZATION
+
 
         self.accuracy = self.tools.config_variables['accuracy']
 
@@ -773,6 +776,163 @@ class Molecule:
         two_body_integrals = 1/4*two_body_tensor.reshape(n_spatial_orbitals,2,n_spatial_orbitals,2,n_spatial_orbitals,2,n_spatial_orbitals,2).sum(axis = (1,3,5,7))
 
         return one_body_integrals, two_body_integrals
+    
+    #HERE BEGINS THE DOUBLE FACTORIZATION CODE
+    def run_double_factorization(self):
+        """
+        Realiza la doble factorización del Hamiltoniano molecular y almacena
+        los parámetros relevantes en la instancia para su uso posterior.
+        """
+
+        if hasattr(self, 'double_factorization_done') and self.double_factorization_done:
+            return  # Ya se ha ejecutado
+
+    # 1. Ejecutar PySCF y obtener integrales
+        
+        #mol_data = run_pyscf(geometry=self.molecule_geometry, basis=self.basis, run_scf=True)
+        mol_data = run_pyscf(self.molecule_data, run_scf=True)
+
+        H = MolecularData(self.molecule_geometry, self.basis, multiplicity=1)
+        H.one_body_integrals = mol_data.one_body_integrals
+        H.two_body_integrals = mol_data.two_body_integrals
+        H.n_qubits = mol_data.n_qubits
+
+    # 2. Definir y Ejecutar doble factorización (OpenFermion)
+        
+
+        def prepare_double_factorized_integrals(h1, h2, threshold=1e-6):
+            """
+            Prepare the double factorized form of the two-electron integral tensor.
+
+            This method follows the hierarchical low-rank decomposition described in:
+            "Low-rank factorization of fermionic Hamiltonians with double factorization"
+            (Huggins et al., PRX Quantum 2, 014004, 2021).
+
+            Parameters
+            ----------
+            h1 : np.ndarray
+                One-electron integrals, shape (N, N).
+            h2 : np.ndarray
+                Two-electron integrals, shape (N, N, N, N).
+            threshold : float
+                Truncation threshold for eigenvalue filtering in each factorization step.
+
+            Returns
+            -------
+            dict
+                Dictionary containing factorized terms:
+                    - L_pq: One-electron integrals (h1)
+                    - G_factors: List of first-level factors (L^{(k)})
+                    - B_factors: List of lists of second-level factors (L_k^{(l)})
+                    - ranks: (rank_1, list of rank_2s)
+            """
+            N = h1.shape[0]
+            # Step 1: Reshape two-electron tensor to matrix form V
+            V = h2.transpose(0, 2, 1, 3).reshape(N**2, N**2)
+
+            # Step 2: First-level factorization: V ≈ Σ_k L^{(k)} ⊗ L^{(k)}
+            evals, evecs = eigh(V)
+            idx = np.where(np.abs(evals) > threshold)[0]
+            evals = evals[idx]
+            evecs = evecs[:, idx]
+            rank_1 = len(idx)
+
+            G_factors = []     # List to store the first-level factors L^{(k)}
+            B_factors = []     # List to store B^{(kl)} factors for each first-level factor k
+            rank_2s = []       # List to store the number of second-level terms l per k
+
+            for i in range(rank_1):
+                lam = evals[i]      # Eigenvalue from first-level factorization
+                vec = evecs[:, i]   # Corresponding eigenvector
+
+                # Skip negative eigenvalues (they can lead to invalid square roots)
+                if lam < 0:
+                    #print(f"[!] Warning: Negative eigenvalue λ[{i}] = {lam:.2e}, skipping.")
+                    continue
+
+                try:
+                    # Reshape the eigenvector into a square matrix (N x N)
+                    # This gives the first-level factor: L^{(k)} = √λ_k * v_k
+                    L_k = np.sqrt(lam) * vec.reshape(N, N)
+                except ValueError:
+                    #print(f"[!] Reshape error in first-level factor {i}. Skipping.")
+                    continue
+
+                G_factors.append(L_k)  # Store L^{(k)}
+                
+                
+
+                # Step 3: Second-level factorization: L_k ≈ Σ_l L_k^{(l)} ⊗ L_k^{(l)}
+                # Decompose L^{(k)} ≈ ∑_l B^{(kl)} ⊗ B^{(kl)}
+                try:
+                    evals2, evecs2 = eigh(L_k)  # Diagonalize L_k to get second-level components
+                except Exception as e:
+                    print(f"[!] eigh error at second-level for i={i}: {e}")
+                    continue
+
+                # Keep only eigenvalues above threshold
+                idx2 = np.where(np.abs(evals2) > threshold)[0]
+                evals2 = evals2[idx2]
+                evecs2 = evecs2[:, idx2]
+                rank_2 = len(idx2)          # Number of second-level terms retained
+                rank_2s.append(rank_2)
+
+                B_k = []                    # List of B^{(kl)} for the current L^{(k)}
+                for j in range(rank_2):
+                    if evals2[j] < 0:
+                        #print(f"    [!] Skipping negative λ2[{j}] = {evals2[j]:.2e}")
+                        continue
+                    try:
+                        # Construct B^{(kl)} = √λ_kl * v_kl
+                        B = np.sqrt(evals2[j]) * evecs2[:, j]
+                        B_k.append(B)
+                    except Exception as e:
+                        print(f"    [!] Error forming B-factor {j} for L_k[{i}]: {e}")
+
+                B_factors.append(B_k)            # Store all B^{(kl)} associated with L^{(k)}
+
+            # Return the full decomposition: one-body, first-level and second-level terms, and ranks
+            return {
+                "L_pq": h1,                      # One-electron integrals
+                "G_factors": G_factors,         # First-level factors (L^{(k)})
+                "B_factors": B_factors,         # Second-level factors (B^{(kl)})
+                "ranks": (rank_1, rank_2s)      # Number of components in each level
+            }
+
+        # Prepare integrals of double factorization
+        df = prepare_double_factorized_integrals(H.one_body_integrals, H.two_body_integrals)
+    
+        # 3. Store relevant parameters from the double factorization results
+        rank_1, rank_2 = df["ranks"]    
+        # rank_1: number of first-level factors (k)
+        # rank_2: list of second-level factors per k (number of l terms per L^{(k)})
+
+        self.rank_1 = rank_1
+        self.rank_2 = sum(rank_2)      # Total number of second-level terms: Σ_k rank_2^{(k)}
+
+        # λ₁ (lambda_1) is defined as the sum of ||L^{(k)}||, where L^{(k)} are first-level factors
+        # These norms affect the scaling of the Trotter or qubitized simulation
+        self.lambda_1 = sum(np.linalg.norm(mat) for mat in df["G_factors"])
+
+        # df["B_factors"] is a list of lists: one list of B^{(kl)} matrices for each k
+        # We flatten the list and compute the maximum norm among all B^{(kl)} factors
+        if df["B_factors"]:
+            all_B_factors = [mat for sublist in df["B_factors"] for mat in sublist]
+            self.lambda_2 = max(np.linalg.norm(mat) for mat in all_B_factors)  # Used to estimate ||H₂||
+        else:
+            self.lambda_2 = 0  # If no B^{(kl)} factors are present, set to 0
+
+        # Store system size information
+        self.n_orbitals = H.n_qubits  # Number of molecular orbitals
+        self.n_qubits = H.n_qubits    # Number of qubits required
+        self.double_factorization_done = True  # Flag indicating the process completed
+        
+        #HERE ENDS THE DOUBLE FACTORIZATION CODE
+
+
+
+
+
 class Molecule_Hamiltonian:
 
     def __init__(self, molecule_info, tools):

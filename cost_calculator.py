@@ -1,11 +1,15 @@
 import numpy as np
 from scipy.optimize import minimize, NonlinearConstraint
 
+
+
 import trotter_based_methods
 import taylor_based_methods
 import plane_waves_methods
 import qrom_methods
 import interaction_picture
+
+import tfm_DFQ # Double Factorization Qubitization method
 
 class Cost_calculator:
 
@@ -25,7 +29,9 @@ class Cost_calculator:
                     'low_depth_taylor_on_the_fly': [],
                     'linear_t': [],
                     'sparsity_low_rank': [],
-                    'interaction_picture': []
+                    'interaction_picture': [],
+                    
+                    'double_factorization': [] # for the Double Factorization Qubitization method
                     }
         self.basis = self.tools.config_variables['basis']
         self.runs = self.tools.config_variables['runs']
@@ -406,6 +412,26 @@ class Cost_calculator:
                         lambda_value_T, 
                         lambda_value_U_V,
                         J)]
+                    
+                    
+        #HERE BEGINS THE DOUBLE FACTORIZATION QUBITIZATION METHOD
+        if method == 'double_factorization':
+            self.molecule.run_double_factorization()
+
+            M = self.molecule.rank_1 + self.molecule.rank_2
+            N = self.molecule.n_orbitals
+            #epsilon = self.tools.config_variables['epsilon']
+            epsilon = self.tools.config_variables.get('epsilon', 1e-3)  # usa 1e-3 por defecto si falta
+
+            alpha_df = self.molecule.lambda_1 + self.molecule.lambda_2
+            lambda_ = 2  #  parameter
+
+            df_method = tfm_DFQ.DoubleFactorization(self.tools)
+            for _ in range(self.runs):
+                self.costs['double_factorization'] += [df_method.toffoli_gate_cost(
+                    M, N, epsilon, alpha_df, lambda_)]
+
+        #HERE ENDS THE DOUBLE FACTORIZATION QUBITIZATION METHOD
 
         else:
             print('<*> ERROR: method', method, 'not implemented or not existing')
