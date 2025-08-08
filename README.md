@@ -50,7 +50,9 @@ pip install pandas numpy h5py scipy sympy matplotlib
 ```
 python main.py [molecule name] [method name]
 ```
+ethod name: qdrift , rand_ham, taylor_naive, taylor_on_the_fly, configuration_interaction, low_depth_trotter, shc_trotter, low_depth_taylor, low_depth_taylor_on_the_fly, linear_t, sparsity_low_rank, interaction_picture, double_factorization_method (the one added)
 
+molecule name: h2, hydrofluoric acid, water, ammonia, methane, O2, CO2, NaCl
 ## Examples
 You can find some snippet examples in the folder [snippets](/snippets)
 
