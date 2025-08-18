@@ -2,3 +2,5 @@ FeMoCo/integrals/*.h5
 FeMoCo/femoco_data/*
 *.h5
 *FCIDUMP*
+
+
