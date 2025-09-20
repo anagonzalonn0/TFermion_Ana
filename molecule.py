@@ -3,6 +3,9 @@ import json
 import numpy as np
 import h5py
 import scipy 
+# al inicio del archivo (si no lo tienes ya)
+from types import SimpleNamespace
+
 from scipy.linalg import eigh #Double factorization requires the eigenvalues and eigenvectors of the Hamiltonian, which can be computed with eigh
 
 #from openfermionpsi4 import run_psi4
@@ -48,50 +51,80 @@ tol = 1e-8
 
 class Molecule:
 
-    def __init__(self, molecule_info, molecule_info_type, tools, charge = 0, program = 'pyscf'):
+    def __init__(self, molecule_info, molecule_info_type, tools, charge=0, program='pyscf'):
 
         self.molecule_info = molecule_info
         self.tools = tools
         self.program = program
-        self.basis = self.tools.config_variables.get('basis', 'sto-3g') ##ADD BY ANA FOR DOUBLE FACTORIZATION
-
-
+        self.basis = self.tools.config_variables.get('basis', 'sto-3g')  # para DF
         self.accuracy = self.tools.config_variables['accuracy']
 
-        # molecule info could be a name, geometry information or hamiltonian description
+        # tipo de info
         self.molecule_info_type = molecule_info_type
+
+        # inicializamos la variable siempre
+        molecule_geometry = None
 
         if self.molecule_info_type == 'name':
             self.molecule_info = self.molecule_info.replace('_', ' ')
             molecule_geometry = geometry_from_pubchem(self.molecule_info)
 
         elif self.molecule_info_type == 'geometry':
-            molecule_geometry = None
-            with open(molecule_info) as json_file: 
+            with open(molecule_info) as json_file:
                 molecule_geometry = json.load(json_file)['atoms']
 
-        if molecule_geometry == None:
-            print("<!> WARNING: It was not possible to get the geometry of the molecule. The geometry is empty, parameters will be load from file (if it exists)")
-            self.has_data = false
-        else:
-            self.has_data = true
+        elif self.molecule_info_type == 'h5':
+            # Cargar integrales desde un archivo HDF5
+            import h5py, numpy as np
+            from types import SimpleNamespace
 
+            with h5py.File(self.molecule_info, "r") as f:
+                h1 = f.get('h1', f.get('h0'))[()]  # alias h1/h0
+                eri = f.get('eri', f.get('h2'))[()]  # alias eri/h2
+                e_nuc = float(f.get('e_nuc', f.get('E_nuc', f.get('constant', 0.0)))[()])
+                nelec = int(f.get('nelec', f.get('n_electrons', np.array(2 * h1.shape[0])))[()])
+
+            self.has_data = True
+            self.molecule_geometry = []  # no se usa para DF
+            self.molecule_data = SimpleNamespace(
+                one_body_integrals=h1,
+                two_body_integrals=eri,
+                n_electrons=nelec,
+                nuclear_repulsion=e_nuc,
+                n_orbitals=h1.shape[0],
+                _pyscf_data={}
+            )
+            self.occupied_indices = None
+            self.active_indices = None
+            self.virtual_indices = []
+            self.N = 2 * self.molecule_data.n_orbitals
+            return  # << importante, para no seguir al bloque de geometría
+
+        # A partir de aquí, solo si es name o geometry
+        if molecule_geometry is None:
+            print("<!> WARNING: It was not possible to get the geometry of the molecule. "
+                "The geometry is empty, parameters will be loaded from file (if it exists)")
+            self.has_data = False
+        else:
+            self.has_data = True
             [self.molecule_geometry, self.molecule_data] = self.calculate_geometry_params(molecule_geometry, charge)
 
-            #Add possibility of boundary conditions https://sunqm.github.io/pyscf/tutorial.html#initializing-a-crystal -> Seems quite complicated and not straightforward
             if program == 'psi4':
                 raise Warning('Psi4 is not supported, try pyscf')
-                self.molecule_psi4 = run_psi4(self.molecule_data,run_scf=True, run_mp2=True, run_fci=False)
+                self.molecule_psi4 = run_psi4(self.molecule_data, run_scf=True, run_mp2=True, run_fci=False)
 
             elif program == 'pyscf':
-                self.molecule_pyscf = run_pyscf(self.molecule_data,run_scf=True, run_mp2=True, run_ccsd=True)
-                print('<i> HF energy, MP2 energy, CCSD energy', self.molecule_pyscf.hf_energy, self.molecule_pyscf.mp2_energy, self.molecule_pyscf.ccsd_energy)
+                self.molecule_pyscf = run_pyscf(self.molecule_data,
+                                                run_scf=True, run_mp2=True, run_ccsd=True)
+                print('<i> HF energy, MP2 energy, CCSD energy',
+                    self.molecule_pyscf.hf_energy,
+                    self.molecule_pyscf.mp2_energy,
+                    self.molecule_pyscf.ccsd_energy)
 
             self.occupied_indices = None
-            self.active_indices = None #range(self.molecule_data.n_orbitals) # This is the default
+            self.active_indices = None
             self.virtual_indices = []
-
-            self.N  = self.molecule_data.n_orbitals * 2 # The 2 is due to orbitals -> spin orbitals
+            self.N = self.molecule_data.n_orbitals * 2
 
         #self.build_grid()
         #self.get_basic_parameters()
@@ -783,150 +816,117 @@ class Molecule:
         Realiza la doble factorización del Hamiltoniano molecular y almacena
         los parámetros relevantes en la instancia para su uso posterior.
         """
-
-        if hasattr(self, 'double_factorization_done') and self.double_factorization_done:
+        if getattr(self, 'double_factorization_done', False):
             return  # Ya se ha ejecutado
 
-    # 1. Ejecutar PySCF y obtener integrales
-        
-        #mol_data = run_pyscf(geometry=self.molecule_geometry, basis=self.basis, run_scf=True)
-        mol_data = run_pyscf(self.molecule_data, run_scf=True)
+        # -------- 1) Obtener integrales H1/H2 sin recalcular si vienen de HDF5 --------
+        if hasattr(self.molecule_data, 'one_body_integrals') and hasattr(self.molecule_data, 'two_body_integrals'):
+            # Caso .h5 (FeMoco) o pipeline previo ya cargado
+            H1 = self.molecule_data.one_body_integrals
+            H2 = self.molecule_data.two_body_integrals
+        else:
+            # Ruta clásica (moléculas pequeñas): correr PySCF
+            # mol_data = run_pyscf(geometry=self.molecule_geometry, basis=self.basis, run_scf=True)
+            mol_data = run_pyscf(self.molecule_data, run_scf=True)
+            H1 = mol_data.one_body_integrals
+            H2 = mol_data.two_body_integrals
 
-        H = MolecularData(self.molecule_geometry, self.basis, multiplicity=1)
-        H.one_body_integrals = mol_data.one_body_integrals
-        H.two_body_integrals = mol_data.two_body_integrals
-        H.n_qubits = mol_data.n_qubits
+        norb = H1.shape[0]
+        n_qubits = 2 * norb
 
-    # 2. Definir y Ejecutar doble factorización (OpenFermion)
-        
-
+        # -------- 2) Doble factorización --------
         def prepare_double_factorized_integrals(h1, h2, threshold=1e-6):
             """
-            Prepare the double factorized form of the two-electron integral tensor.
-
-            This method follows the hierarchical low-rank decomposition described in:
-            "Low-rank factorization of fermionic Hamiltonians with double factorization"
-            (Huggins et al., PRX Quantum 2, 014004, 2021).
-
-            Parameters
-            ----------
-            h1 : np.ndarray
-                One-electron integrals, shape (N, N).
-            h2 : np.ndarray
-                Two-electron integrals, shape (N, N, N, N).
-            threshold : float
-                Truncation threshold for eigenvalue filtering in each factorization step.
-
-            Returns
-            -------
-            dict
-                Dictionary containing factorized terms:
-                    - L_pq: One-electron integrals (h1)
-                    - G_factors: List of first-level factors (L^{(k)})
-                    - B_factors: List of lists of second-level factors (L_k^{(l)})
-                    - ranks: (rank_1, list of rank_2s)
+            Double factorization (Huggins et al., PRX Quantum 2, 014004, 2021).
+            Devuelve factores de 1er y 2º nivel y los rangos.
             """
             N = h1.shape[0]
-            # Step 1: Reshape two-electron tensor to matrix form V
+            # Matriz V de tamaño (N^2 x N^2) a partir de h2 en notación química (pq|rs)
             V = h2.transpose(0, 2, 1, 3).reshape(N**2, N**2)
 
-            # Step 2: First-level factorization: V ≈ Σ_k L^{(k)} ⊗ L^{(k)}
+            # 1er nivel: V ≈ Σ_k L^{(k)} ⊗ L^{(k)}
             evals, evecs = eigh(V)
             idx = np.where(np.abs(evals) > threshold)[0]
             evals = evals[idx]
             evecs = evecs[:, idx]
             rank_1 = len(idx)
 
-            G_factors = []     # List to store the first-level factors L^{(k)}
-            B_factors = []     # List to store B^{(kl)} factors for each first-level factor k
-            rank_2s = []       # List to store the number of second-level terms l per k
+            G_factors = []
+            B_factors = []
+            rank_2s = []
 
             for i in range(rank_1):
-                lam = evals[i]      # Eigenvalue from first-level factorization
-                vec = evecs[:, i]   # Corresponding eigenvector
+                lam = evals[i]
+                vec = evecs[:, i]
 
-                # Skip negative eigenvalues (they can lead to invalid square roots)
-                if lam < 0:
-                    #print(f"[!] Warning: Negative eigenvalue λ[{i}] = {lam:.2e}, skipping.")
+                if lam <= 0:
+                    # si quieres conservar signo, podrías usar np.sqrt(abs(lam)) y propagar el signo en un factor aparte
                     continue
 
                 try:
-                    # Reshape the eigenvector into a square matrix (N x N)
-                    # This gives the first-level factor: L^{(k)} = √λ_k * v_k
                     L_k = np.sqrt(lam) * vec.reshape(N, N)
                 except ValueError:
-                    #print(f"[!] Reshape error in first-level factor {i}. Skipping.")
                     continue
 
-                G_factors.append(L_k)  # Store L^{(k)}
-                
-                
+                G_factors.append(L_k)
 
-                # Step 3: Second-level factorization: L_k ≈ Σ_l L_k^{(l)} ⊗ L_k^{(l)}
-                # Decompose L^{(k)} ≈ ∑_l B^{(kl)} ⊗ B^{(kl)}
+                # 2º nivel: L_k ≈ Σ_l B^{(kl)} ⊗ B^{(kl)}
                 try:
-                    evals2, evecs2 = eigh(L_k)  # Diagonalize L_k to get second-level components
+                    evals2, evecs2 = eigh(L_k)
                 except Exception as e:
                     print(f"[!] eigh error at second-level for i={i}: {e}")
                     continue
 
-                # Keep only eigenvalues above threshold
                 idx2 = np.where(np.abs(evals2) > threshold)[0]
                 evals2 = evals2[idx2]
                 evecs2 = evecs2[:, idx2]
-                rank_2 = len(idx2)          # Number of second-level terms retained
+                rank_2 = len(idx2)
                 rank_2s.append(rank_2)
 
-                B_k = []                    # List of B^{(kl)} for the current L^{(k)}
+                B_k = []
                 for j in range(rank_2):
-                    if evals2[j] < 0:
-                        #print(f"    [!] Skipping negative λ2[{j}] = {evals2[j]:.2e}")
+                    if evals2[j] <= 0:
                         continue
                     try:
-                        # Construct B^{(kl)} = √λ_kl * v_kl
                         B = np.sqrt(evals2[j]) * evecs2[:, j]
                         B_k.append(B)
                     except Exception as e:
                         print(f"    [!] Error forming B-factor {j} for L_k[{i}]: {e}")
+                B_factors.append(B_k)
 
-                B_factors.append(B_k)            # Store all B^{(kl)} associated with L^{(k)}
-
-            # Return the full decomposition: one-body, first-level and second-level terms, and ranks
             return {
-                "L_pq": h1,                      # One-electron integrals
-                "G_factors": G_factors,         # First-level factors (L^{(k)})
-                "B_factors": B_factors,         # Second-level factors (B^{(kl)})
-                "ranks": (rank_1, rank_2s)      # Number of components in each level
+                "L_pq": h1,
+                "G_factors": G_factors,
+                "B_factors": B_factors,
+                "ranks": (rank_1, rank_2s)
             }
 
-        # Prepare integrals of double factorization
-        df = prepare_double_factorized_integrals(H.one_body_integrals, H.two_body_integrals)
-    
-        # 3. Store relevant parameters from the double factorization results
-        rank_1, rank_2 = df["ranks"]    
-        # rank_1: number of first-level factors (k)
-        # rank_2: list of second-level factors per k (number of l terms per L^{(k)})
+        df = prepare_double_factorized_integrals(H1, H2)
 
+        # -------- 3) Guardar resultados --------
+        rank_1, rank_2_list = df["ranks"]
         self.rank_1 = rank_1
-        self.rank_2 = sum(rank_2)      # Total number of second-level terms: Σ_k rank_2^{(k)}
+        self.rank_2 = sum(rank_2_list) if rank_2_list else 0
 
-        # λ₁ (lambda_1) is defined as the sum of ||L^{(k)}||, where L^{(k)} are first-level factors
-        # These norms affect the scaling of the Trotter or qubitized simulation
-        self.lambda_1 = sum(np.linalg.norm(mat) for mat in df["G_factors"])
+        # λ₁: suma de normas de L^{(k)}
+        self.lambda_1 = float(sum(np.linalg.norm(mat) for mat in df["G_factors"])) if df["G_factors"] else 0.0
 
-        # df["B_factors"] is a list of lists: one list of B^{(kl)} matrices for each k
-        # We flatten the list and compute the maximum norm among all B^{(kl)} factors
+        # λ₂: máximo de normas entre todos los B^{(kl)} (si lo usas como proxy de ||H₂||)
         if df["B_factors"]:
-            all_B_factors = [mat for sublist in df["B_factors"] for mat in sublist]
-            self.lambda_2 = max(np.linalg.norm(mat) for mat in all_B_factors)  # Used to estimate ||H₂||
+            all_B = [mat for sub in df["B_factors"] for mat in sub]
+            self.lambda_2 = float(max((np.linalg.norm(mat) for mat in all_B), default=0.0))
         else:
-            self.lambda_2 = 0  # If no B^{(kl)} factors are present, set to 0
+            self.lambda_2 = 0.0
 
-        # Store system size information
-        self.n_orbitals = H.n_qubits  # Number of molecular orbitals
-        self.n_qubits = H.n_qubits    # Number of qubits required
-        self.double_factorization_done = True  # Flag indicating the process completed
-        
+        # Tamaños del sistema
+        self.n_orbitals = norb
+        self.n_qubits = n_qubits
+
+        self.double_factorization_done = True
+        print(f"[DF] N={self.n_orbitals}, rank_1={self.rank_1}, rank_2={self.rank_2}, "
+            f"M={self.rank_1 + self.rank_2}, lambda_1={self.lambda_1:.3e}, lambda_2={self.lambda_2:.3e}")
+
+
         #HERE ENDS THE DOUBLE FACTORIZATION CODE
 
 

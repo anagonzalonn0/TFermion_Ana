@@ -50,7 +50,15 @@ pip install pandas numpy h5py scipy sympy matplotlib
 ```
 python main.py [molecule name] [method name]
 ```
-ethod name: qdrift , rand_ham, taylor_naive, taylor_on_the_fly, configuration_interaction, low_depth_trotter, shc_trotter, low_depth_taylor, low_depth_taylor_on_the_fly, linear_t, sparsity_low_rank, interaction_picture, double_factorization_method (the one added)
+for FeMoCo and double_factorization:
+```
+python main.py integrals/eri_reiher.h5 double_factorization
+```
+for FeMoCo and sparsity_low_rank:
+```
+python main.py 'integrals/eri_reiher' sparsity_low_rank
+```
+method name: qdrift , rand_ham, taylor_naive, taylor_on_the_fly, configuration_interaction, low_depth_trotter, shc_trotter, low_depth_taylor, low_depth_taylor_on_the_fly, linear_t, sparsity_low_rank, interaction_picture, double_factorization_method (the one added)
 
 molecule name: h2, hydrofluoric acid, water, ammonia, methane, O2, CO2, NaCl
 ## Examples

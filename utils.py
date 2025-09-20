@@ -231,35 +231,46 @@ class Utils():
         with open(molecule_info) as json_file: return json.load(json_file['atoms'])
 
     def check_molecule_info(self, molecule_info):
+        """
+        Determina el tipo de input de la molécula: 'name', 'geometry', 'hamiltonian', 'h5'.
+        Añade alias nombre->ruta .h5 (p.ej., 'femoco' -> 'integrals/FeMoco.h5').
+        """
 
-        if molecule_info == "":
+        import os
+
+        if not molecule_info:
             return None
 
-        # the hamiltonian is given by a path containing files eri_reiher.h5 and eri_reiher_cholesky.h5 or similarly for eri_li
-        if os.path.isdir(molecule_info.split('/')[0] + '/'):
+        # ----- ALIAS explícitos: nombre -> ruta HDF5 -----
+        alias_map = {
+            "femoco": "integrals/FeMoco.h5",
+            # añade aquí más alias si lo necesitas
+        }
+        key = str(molecule_info).strip().lower()
+        if key in alias_map:
+            resolved = alias_map[key]
+            if hasattr(self, "args") and hasattr(self.args, "molecule_info"):
+                self.args.molecule_info = resolved
+            return "h5"
 
+        # ----- Detección directa por extensión o archivo existente -----
+        _, ext = os.path.splitext(molecule_info)
+        ext = ext.lower()
+
+        if ext in (".h5", ".hdf5"):
+            return "h5"
+        elif ext in (".geo", ".json"):
+            return "geometry"
+        elif ext != "":
+            print('<*> ERROR: extension in molecule information not recognized. '
+                'It should be .geo/.json (geometry), .h5/.hdf5 (HDF5).')
+            return "error"
+
+        # ----- Sin extensión: puede ser nombre o modo "hamiltonian" legacy -----
+        base = molecule_info.split('/')[0] + '/'
+        if os.path.isdir(base):
             if os.path.isfile(molecule_info + '.h5') and os.path.isfile(molecule_info + '_cholesky.h5'):
                 return "hamiltonian"
-            else:
-                print("<*> ERROR: The given path does not contain the files {molecule_info}.h5 and {molecule_info}_cholesky.h5 needed for hamiltonian input".format(molecule_info = molecule_info))
-                return "error"
 
-        else:
-
-            index_last_dot = molecule_info[::-1].find('.')
-
-            # there is no dot, so no extension. Therefore, it is a name
-            if index_last_dot == -1:
-                return 'name'
-
-            # there is a dot, so it is a file with extension
-            else:
-
-                # get the extension of the file taking the character from last dot
-                extension = molecule_info[-index_last_dot:]
-
-                if extension == 'geo':
-                    return 'geometry'
-
-                else:
-                    print('<*> ERROR: extension in molecule information not recognized. It should be .chem (geometry) or .h5/.hdf5 (hamiltonian). The molecule name can not contain dots')
+        # ----- Default: tratar como nombre (PubChem/geom) -----
+        return "name"

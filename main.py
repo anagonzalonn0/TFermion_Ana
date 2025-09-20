@@ -5,8 +5,7 @@ import time
 
 import utils
 import cost_calculator
-from molecule import Molecule
-from molecule import Molecule_Hamiltonian
+from molecule import Molecule, Molecule_Hamiltonian
 
 print('\n#####################################################################')
 print('##                             TFermion                            ##')
@@ -17,91 +16,117 @@ print('#####################################################################\n')
 
 start_time = time.time()
 
-#Read config file with the QFold configuration variables
+# Read config file with the QFold configuration variables
 config_path = './config/config.json'
 tools = utils.Utils(config_path)
 
 args = tools.parse_arguments()
-if args.charge == None: args.charge = 0
+if args.charge is None:
+    args.charge = 0
 
-# Basis sets that we could be using: STO-3G, DZ, 6-311G, cc-pVDZ, and cc-pVTZ basis sets, in increasing precision order.
+# Detect type for the CLI argument (single target mode)
+cli_type = tools.check_molecule_info(args.molecule_info)
 
-# Some easy examples: HYDROFLUORIC ACID, Ammonia, water, methane, O2, CO2, O3, NaCl
-# More complex examples (beware the time): https://pubchem.ncbi.nlm.nih.gov/compound/7966 (cyclohexanol, MA's choosing)
-# https://pubchem.ncbi.nlm.nih.gov/compound/25000034 (Tetrahedral, 1.66 Amstrong), https://pubchem.ncbi.nlm.nih.gov/compound/167316 (table 1 in https://chemistry-europe.onlinelibrary.wiley.com/doi/full/10.1002/cphc.200700128?casa_token=fYXpuPMymU4AAAAA%3Ao0dz2LXXn8yVq56nOt5ZrV92HiuzItsffXm6Nn_O9z3hXt2d2Sm2qVX-GZwQsnQ_z4PPPPrN2jSqfIg)
-#molecule = Molecule(name = 'H', tools = tools)
+# --------------------------- BATCH MODE ---------------------------
+if not cli_type:
+    results = {}
 
-molecule_info_type = tools.check_molecule_info(args.molecule_info)
+    for mol_name in tools.config_variables['molecules']:
+        # Resuelve tipo y posible alias (p.ej. 'femoco' -> 'integrals/FeMoco.h5')
+        args.molecule_info = mol_name
+        molecule_info_type = tools.check_molecule_info(args.molecule_info)
 
-if not molecule_info_type:
-    molecule_info_type = 'name'
-    dictionary = {}
+        if molecule_info_type == "error":
+            continue
 
-    for molecule_info in tools.config_variables['molecules']:
-        args.molecule_info = molecule_info
-        dictionary[molecule_info] = {}
+        results[mol_name] = {}
 
-        molecule = None
-        if molecule_info_type == 'name' or molecule_info_type == 'geometry':
-            molecule = Molecule(molecule_info = args.molecule_info, molecule_info_type = molecule_info_type, tools = tools, charge = args.charge)
+        # Instancia de la molécula
+        if molecule_info_type in ('name', 'geometry', 'h5'):
+            molecule = Molecule(
+                molecule_info=args.molecule_info,
+                molecule_info_type=molecule_info_type,
+                tools=tools,
+                charge=args.charge
+            )
         elif molecule_info_type == 'hamiltonian':
-            molecule = Molecule_Hamiltonian(molecule_info = args.molecule_info, tools = tools)
-        else: # if there is no match between the input file extension and the requiered, finish the program
-            exit()
+            molecule = Molecule_Hamiltonian(
+                molecule_info=args.molecule_info,
+                tools=tools
+            )
+        else:
+            # tipo desconocido
+            continue
 
-        #Active space
-        if args.ao_labels:
-            ne_act_cas = molecule.active_space(args.ao_labels[0].replace('\\',''))
+        # Active space solo si viene de 'name' o 'geometry'
+        if args.ao_labels and getattr(molecule, 'has_data', False) and molecule_info_type in ('name', 'geometry'):
+            molecule.active_space(args.ao_labels[0].replace('\\', ''))
 
-        #molecule.low_rank_approximation(occupied_indices = [0,1,2], active_indices = [3,4], virtual_indices = [5,6], sparsify = True)
-        #ne_act_cas, n_mocore, n_mocas, n_movir = molecule.active_space(ao_labels=['O 2pz'])
-
+        # Calcula costes para todos los métodos declarados
         c_calculator = cost_calculator.Cost_calculator(molecule, tools, molecule_info_type)
         for method in tools.methods:
             c_calculator.calculate_cost(method)
-            c_calculator.costs[method] = [x for x in c_calculator.costs[method] if (not np.isnan(x) and not np.isinf(x))]
-            print(method, molecule_info, len(c_calculator.costs[method]))
-            median = np.nanmedian(c_calculator.costs[method])
-            dictionary[molecule_info][method] = "{:0.2e}".format(median)
+            vals = [x for x in c_calculator.costs[method] if (not np.isnan(x) and not np.isinf(x))]
+            print(method, mol_name, len(vals))
+            median = np.nanmedian(vals) if len(vals) else np.nan
+            results[mol_name][method] = "{:0.2e}".format(median) if not np.isnan(median) else "nan"
 
-    pd.DataFrame(dictionary).to_csv('./results/results_'+ str(tools.config_variables['gauss2plane_overhead'])+'.csv')
+    pd.DataFrame(results).to_csv('./results/results_' + str(tools.config_variables['gauss2plane_overhead']) + '.csv')
 
+# --------------------------- SINGLE MODE --------------------------
+else:
+    molecule_info_type = cli_type
 
-else: 
-    molecule = None
-    if molecule_info_type == 'name' or molecule_info_type == 'geometry':
-        molecule = Molecule(molecule_info = args.molecule_info, molecule_info_type = molecule_info_type, tools = tools, charge = args.charge)
+    # Instancia según tipo
+    if molecule_info_type in ('name', 'geometry', 'h5'):
+        molecule = Molecule(
+            molecule_info=args.molecule_info,
+            molecule_info_type=molecule_info_type,
+            tools=tools,
+            charge=args.charge
+        )
     elif molecule_info_type == 'hamiltonian':
-        molecule = Molecule_Hamiltonian(molecule_info = args.molecule_info, tools = tools)
-    else: # if there is no match between the input file extension and the requiered, finish the program
-        exit()
+        molecule = Molecule_Hamiltonian(
+            molecule_info=args.molecule_info,
+            tools=tools
+        )
+    else:
+        raise SystemExit(1)
 
-    #Active space
-    if args.ao_labels and molecule.has_data:
-        ne_act_cas = molecule.active_space(args.ao_labels[0].replace('\\',''))
+    # Active space solo si viene de 'name' o 'geometry'
+    if args.ao_labels and getattr(molecule, 'has_data', False) and molecule_info_type in ('name', 'geometry'):
+        molecule.active_space(args.ao_labels[0].replace('\\', ''))
 
-    #molecule.low_rank_approximation(occupied_indices = [0,1,2], active_indices = [3,4], virtual_indices = [5,6], sparsify = True)
-    #ne_act_cas, n_mocore, n_mocas, n_movir = molecule.active_space(ao_labels=['O 2pz'])
-
-    methods_to_execute = [args.method] if args.method!='all' else tools.methods
+    methods_to_execute = [args.method] if args.method != 'all' else tools.methods
     for method in methods_to_execute:
-
         c_calculator = cost_calculator.Cost_calculator(molecule, tools, molecule_info_type)
         c_calculator.calculate_cost(method)
-        median = np.nanmedian(c_calculator.costs[method])
-
-        print('<i> RESULT => The cost to calculate the energy of', args.molecule_info.upper(),'with method', method.upper(), 'is', "{:0.2e}".format(median), 'T gates')
-
-    # The time calculation is deprecated and https://github.com/quantumlib/OpenFermion/blob/master/src/openfermion/resource_estimates/surface_code_compilation/physical_costing.py should be used instead
-    #print('With the specified parameters, synthesising that many T gates should take approximately', "{:0.2e}".format(c_calculator.calculate_time(median)), 'seconds')
+        vals = [x for x in c_calculator.costs[method] if (not np.isnan(x) and not np.isinf(x))]
+        median = np.nanmedian(vals) if len(vals) else np.nan
+        print(
+            '<i> RESULT => The cost to calculate the energy of',
+            str(args.molecule_info).upper(),
+            'with method', method.upper(),
+            'is', "{:0.2e}".format(median) if not np.isnan(median) else "nan",
+            'T gates'
+        )
 
 execution_time = time.time() - start_time
+
 
 print('\n** -------------------------------------------------- **')
 print('**                                                    **')
 print('** Execution time     =>', str(datetime.timedelta(seconds=execution_time)) ,' in hh:mm:ss  **')
 print('********************************************************\n\n')
 
+#### TESTS ###
+# Single (nombre → alias .h5):
+#   python3 main.py femoco double_factorization
+# Single (HDF5 directo):
+#   python3 main.py integrals/FeMoco.h5 double_factorization
+# Otros:
+#   python3 main.py water qdrift 'C 2p'
+#   python3 main.py water taylor_on_the_fly 'C 2p'
 
 #### TESTS ###
 

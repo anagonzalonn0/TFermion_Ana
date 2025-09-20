@@ -415,7 +415,7 @@ class Cost_calculator:
                     
                     
         #HERE BEGINS THE DOUBLE FACTORIZATION QUBITIZATION METHOD
-        if method == 'double_factorization':
+        elif method == 'double_factorization':
             self.molecule.run_double_factorization()
 
             M = self.molecule.rank_1 + self.molecule.rank_2
